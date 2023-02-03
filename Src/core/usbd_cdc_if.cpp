@@ -23,9 +23,7 @@
 extern "C"
 {
 #include "usbd_cdc_if.h"
-#include "trace.h"
 }
-#include "webserial/commands.hpp"
 
 /* USER CODE BEGIN INCLUDE */
 

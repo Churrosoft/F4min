@@ -33,41 +33,13 @@
 
 extern "C" {
 
-#ifdef TRACE
-#include <stdio.h>
-#include <stdlib.h>
-#include <trace.h>
-#endif
-
 #include "can.h"
 #include "dma.h"
 #include "spi.h"
 #include "tim.h"
-#include "usb_device.h"
-#include "usbd_cdc.h"
 }
 #include <cstdlib>
 
-#include "aliases/memory.hpp"
-#include "cpwm/cpwm.hpp"
-#include "cpwm/rpm_calc.h"
-#include "debug/debug_local.h"
-#include "efi_config.hpp"
-#include "engine/engine.hpp"
-#include "engine_status.hpp"
-#include "ignition/include/ignition.hpp"
-#include "injection/injection.hpp"
-#include "memory/include/config.hpp"
-#include "pmic/pmic.hpp"
-#include "sensors/sensors.hpp"
-#include "usbd_cdc_if.h"
-
-#include "webserial/commands.hpp"
-
-#ifdef ENABLE_CAN_ISO_TP
-#include "can/can_enviroment.h"
-#include "can/can_wrapper.h"
-#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -77,6 +49,9 @@ extern "C" {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define EFI_INVERT_PIN(PORT, PIN) \
+  HAL_GPIO_WritePin(PORT, PIN, HAL_GPIO_ReadPin(PORT, PIN) == GPIO_PIN_RESET ? GPIO_PIN_SET : GPIO_PIN_RESET)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -88,14 +63,8 @@ extern "C" {
 
 /* USER CODE BEGIN PV */
 SPI_HandleTypeDef hspi2;
-bool MOTOR_ENABLE;
-bool SINC;
-int32_t _INY_T1 = 450;
 
-uint8_t INJECTION_STRATEGY = INJECTION_MODE_SPI;
-uint8_t IGNITION_STRATEGY = IGNITION_MODE_WASTED_SPARK;
-uint32_t IGNITION_DWELL_TIME = DEFAULT_DWELL_TIME;
-uint32_t last_cycle, last_mid_cycle;
+int32_t last_mid_cycle = 450;
 
 /* USER CODE END PV */
 
@@ -110,11 +79,11 @@ void MX_NVIC_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
 #ifdef TESTING
-uint32_t mocktick = 0;
-uint32_t tickStep = 15000;    // 4k rpm // 50000 => 1200 // 80000 => 750
 #define PIO_UNIT_TESTING
 #endif
+
 /* USER CODE END 0 */
 #ifndef PIO_UNIT_TESTING
 /**
@@ -123,7 +92,7 @@ uint32_t tickStep = 15000;    // 4k rpm // 50000 => 1200 // 80000 => 750
  */
 int main(void) {
   /* USER CODE BEGIN 1 */
-  set_default_engine_config();
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -134,7 +103,6 @@ int main(void) {
 
   /* USER CODE BEGIN Init */
 
-  MOTOR_ENABLE = true;
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -147,156 +115,31 @@ int main(void) {
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_CRC_Init();
-
-  MX_CAN1_Init();
-  MX_SPI2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM9_Init();
   MX_TIM10_Init();
-  // MX_TIM11_Init();
-
-#ifdef ENABLE_US_TIM
-  MX_TIM13_Init();
-  HAL_TIM_Base_Start_IT(&htim13);
-#endif
-
+  
   MX_NVIC_Init();
   /*  HAL_InitTick(0); */
   /* USER CODE BEGIN 2 */
 
-#ifdef ENABLE_PMIC
-  PMIC::init();
-  PMIC::enable();
-  // PMIC::setup_spark();
-#endif
-
-  HAL_GPIO_WritePin(PMIC_CS_GPIO_Port, PMIC_CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(PMIC_CS_GPIO_Port, PMIC_CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(MEMORY_CS_GPIO_Port, MEMORY_CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(ADC_CS_GPIO_Port, ADC_CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(LED0_GPIO_Port, LED0_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, GPIO_PIN_SET);
-
-#ifdef ENABLE_WEBSERIAL
-  MX_USB_DEVICE_Init();
-#endif
-  // TODO: BORRAMEEEEEEEEEEEEee
-  injection::on_loop();
-  HAL_TIM_Base_Start_IT(&htim10);
-
-#ifdef ENABLE_DEBUG_SETUP
-  on_setup();
-#endif
-
-#ifdef ENABLE_MEMORY
-  // SPI Memory:
-  W25qxx_Init();
-#endif
-
-  /*   W25qxx_EraseChip(); */
-  efi_cfg::get();
-  // SRAND Init:
-  srand(HAL_GetTick());
-
-#ifdef ENABLE_WEBSERIAL
-  web_serial::setup();
-#endif
   uint32_t StartTime = HAL_GetTick();
 
-  /*   uint8_t arr0[] = {0xf, 0xda, 0xdd};
-    uint32_t arr1[] = {0xf, 0xda, 0xdd};
-    trace_printf("Event: <MEMORY_CRC> Calculated: %d ; %d", HAL_CRC_Calculate(&hcrc, arr1, 3), HAL_CRC_Calculate(&hcrc, (uint32_t *)arr0,
-    3)); */
-  // Event: <MEMORY_CRC> Calculated: 729167232 ; 29477989
-
-#ifdef ENABLE_IGNITION
-  ignition::setup();
-#endif
-
-  injection::AlphaN::calculate_injection_fuel();
-
-#ifdef ENABLE_INJECTION
-  injection::setup();
-#endif
-  /*   // Tabla VE
-    tables::read_all({17, 17, 0x3});
-    // Tabla correccion por bateria:
-    tables::read_all({17, 17, 0x4});
-    // WUE
-    tables::read_all({17, 2, 0x5});
-    // ASE %
-    tables::read_all({17, 2, 0x6});
-    // ASE Taper
-    tables::read_all({17, 2, 0x7});
-    // IDLE /Stepper config
-    tables::read_all({17, 2, 0x7}); */
-
   // Core inits:
-  trace_printf("Event: <CORE> Init on: %d ms\r\n", HAL_GetTick() - StartTime);
 
   // Enable CKP/CMP interrupts:
-  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-#ifdef ENABLE_ENGINE_FRONTEND
-  Engine::onEFISetup();
-#endif
   /* Infinite loop */
 
   /* USER CODE BEGIN WHILE */
   while (1) {
-#ifdef ENABLE_DEBUG_LOOP
-    on_loop();
-#endif
-
-#ifdef ENABLE_WEBSERIAL
-    web_serial::loop();
-    web_serial::command_handler();
-#endif
-
-#ifdef ENABLE_IGNITION
-    ignition::interrupt();
-#endif
-
-#ifdef ENABLE_INJECTION
-    injection::on_loop();
-#endif
-
-#ifdef ENABLE_ENGINE_FRONTEND
-    Engine::onEFILoop();
-#endif
-
-#ifdef ENABLE_SENSORS
-    sensors::loop();
-#endif
-
-#ifdef ENABLE_CAN_ISO_TP
-
-#endif
-
     // mid priority code, runs every 50mS
-    if (HAL_GetTick() - last_mid_cycle >= 50) {
+    if (HAL_GetTick() - last_mid_cycle >= 250) {
       last_mid_cycle = HAL_GetTick();
-#ifdef ENABLE_WEBSERIAL
-      web_serial::command_handler();
-#endif
+      EFI_INVERT_PIN(LED0_GPIO_Port, LED0_Pin);
+      EFI_INVERT_PIN(LED1_GPIO_Port, LED1_Pin);
     }
-
-    // low priority code, runs every 150mS
-    if (HAL_GetTick() - last_cycle >= 150) {
-      last_cycle = HAL_GetTick();
-#ifdef ENABLE_WEBSERIAL
-      web_serial::send_deque();
-#endif
-#ifdef ENABLE_SENSORS
-      sensors::loop_low_priority();
-#endif
-    }
-
-    _RPM = RPM::_RPM;
-    efi_status.cycleStatus = RPM::status;
-    RPM::watch_dog();
   }
   /* USER CODE END WHILE */
   /* USER CODE BEGIN 3 */
@@ -410,7 +253,7 @@ void assert_failed(uint8_t *file, uint32_t line) {
      number,
      ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
-  trace_printf("Wrong parameters value: file %s on line %d\r\n", file, line);
+  //trace_printf("Wrong parameters value: file %s on line %d\r\n", file, line);
 }
 #endif /* USE_FULL_ASSERT */
 
